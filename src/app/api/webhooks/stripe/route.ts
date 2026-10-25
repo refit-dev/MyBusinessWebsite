@@ -7,6 +7,33 @@ import resend from "@/lib/resend";
 import PurchaseConfirmationEmail from "@/emails/PurchaseConfirmationEmail";
 import ProPlanActivatedEmail from "@/emails/ProPlanActivatedEmail";
 
+type PeriodItem = { price?: { id?: string } | null };
+type PeriodField = 'current_period_start' | 'current_period_end';
+type PlanItem = (items: PeriodItem[]) => PeriodItem | undefined;
+
+// Typed like the removed field, which was also absent at runtime when Stripe omitted it.
+function subscriptionPeriod(subscription: object, field: PeriodField, planItem?: PlanItem): number {
+  const legacy: unknown = Reflect.get(subscription, field);
+  if (typeof legacy === 'number') return legacy;
+  const list: unknown = Reflect.get(subscription, 'items');
+  const data: unknown = list && typeof list === 'object' ? Reflect.get(list, 'data') : undefined;
+  const items = (Array.isArray(data) ? data : []).filter(
+    (item): item is PeriodItem => typeof item === 'object' && item !== null,
+  );
+  const periods = new Set(items.map((item) => Reflect.get(item, field)));
+  const chosen = periods.size === 1 ? items[0] : planItem?.(items);
+  const value: unknown = chosen ? Reflect.get(chosen, field) : undefined;
+  return (typeof value === 'number' ? value : undefined) as number;
+}
+
+function getSubscriptionPeriodStart(subscription: object, planItem?: PlanItem): number {
+  return subscriptionPeriod(subscription, 'current_period_start', planItem);
+}
+
+function getSubscriptionPeriodEnd(subscription: object, planItem?: PlanItem): number {
+  return subscriptionPeriod(subscription, 'current_period_end', planItem);
+}
+
 const convex = new ConvexHttpClient(process.env.NEXT_PUBLIC_CONVEX_URL!);
 
 export async function POST(req: Request) {
@@ -107,8 +134,8 @@ async function handleSubscriptionUpsert(subscription: Stripe.Subscription, event
 			stripeSubscriptionId: subscription.id,
 			status: subscription.status,
 			planType: subscription.items.data[0].plan.interval as "month" | "year",
-			currentPeriodStart: subscription.current_period_start,
-			currentPeriodEnd: subscription.current_period_end,
+			currentPeriodStart: (getSubscriptionPeriodStart(subscription, (items) => items[0])),
+			currentPeriodEnd: (getSubscriptionPeriodEnd(subscription, (items) => items[0])),
 			cancelAtPeriodEnd: subscription.cancel_at_period_end,
 		});
 		console.log(`Successfully processed ${eventType} for subscription ${subscription.id}`);
@@ -123,8 +150,8 @@ async function handleSubscriptionUpsert(subscription: Stripe.Subscription, event
 				react: ProPlanActivatedEmail({
 					name: user.name,
 					planType: subscription.items.data[0].plan.interval,
-					currentPeriodStart: subscription.current_period_start,
-					currentPeriodEnd: subscription.current_period_end,
+					currentPeriodStart: (getSubscriptionPeriodStart(subscription, (items) => items[0])),
+					currentPeriodEnd: (getSubscriptionPeriodEnd(subscription, (items) => items[0])),
 					url: process.env.NEXT_PUBLIC_APP_URL!,
 				}),
 			});
